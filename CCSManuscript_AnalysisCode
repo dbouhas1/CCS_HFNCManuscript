@@ -1,0 +1,1152 @@
+---
+title: "CCSManuscript_AnalysisCode"
+author: "Diana Bouhassira"
+date: "12/19/2025"
+format: html
+editor: visual
+---
+
+## Packages
+
+```{r Packages}
+#| eval: true
+#| warning: false
+#| message: false
+library(tidyverse)
+library(gtsummary)
+library(ggalluvial) 
+library(tableone) 
+library(jtools)
+library(Hmisc)
+library(forcats)
+library(broom)
+library(broom.mixed)
+library(lubridate)
+library(lme4)
+library(lmerTest)
+library(lmtest)
+library(sandwich)
+library(glmmTMB)
+library(plotly)
+library(scales)
+library(viridis)
+library(survival)
+library(survminer)
+library(gt)
+library(performance)
+
+options(scipen=999)
+
+#Create Commonly Used Function
+`%!in%` = Negate(`%in%`)
+
+#Select is dplyr::select
+select <- dplyr::select
+```
+
+## Data Import
+
+```{r}
+#| eval: true
+#| warning: false
+#| message: false
+
+#Import Data
+HFNC_data_clean2 <- read_csv("HFNC_data_clean2.csv")
+
+#Mutate to add intubation permitted variable 
+HFNC_data_clean2 <- HFNC_data_clean2 %>%
+  mutate(intubation_permitted = case_when(
+    prior_code_status == "CPR - Full Code" ~ 1, 
+    prior_code_status == "No CPR - Intubate" ~ 1,
+    prior_code_status == "None Listed" ~ 1, 
+    TRUE ~ 0 
+  ))
+
+```
+
+### Subsets
+
+```{r Subsets}
+#OK to I 
+HFNC_data_OKtoI <- HFNC_data_clean2 %>%
+  filter(intubation_permitted == 1)
+
+#Initial vs post-extubation only 
+HFNC_initial <- HFNC_data_clean2 %>%
+  filter(postextub_24 == 0)
+
+HFNC_postextub <- HFNC_data_clean2 %>%
+  filter(postextub_24 == 1)
+
+#IMV within 48 hours, all episodes (initial and post extubation)
+HFNC_data_imv48hrs_all <- HFNC_data_clean2 %>%
+  filter(HFNCend_intubation == 1)
+
+#Everyone who is not IMV within 48 hours (initial and post extubation)
+HFNC_data_notimv48hrs_all <- setdiff(HFNC_data_clean2, HFNC_data_imv48hrs_all)
+
+#But, exclude people who die within 1 hour of IMV or are only started on HFNC 1 hour prior to IMV
+HFNC_data_imv48hrs_all <- HFNC_data_imv48hrs_all %>%
+  mutate(die1hrpostimv = ifelse(!is.na(death_dttm) & death_dttm < postHFNC_IMVstartDttm + lubridate::hours(1), 1, 0),
+         start1hrpreimv = ifelse(HFNC_Ep_startDttm > postHFNC_IMVstartDttm - lubridate::hours(1), 1, 0))
+
+HFNC_data_imv48hrs_all <- HFNC_data_imv48hrs_all %>%
+  filter(start1hrpreimv == 0) %>%
+  filter(die1hrpostimv == 0)
+
+#Initial (not post extubation) HFNC episode ending in IMV 
+HFNC_data_imv48hrs <- HFNC_data_imv48hrs_all %>%
+  filter(postextub_24 == 0)
+```
+
+## Description
+
+```{r Description}
+#| echo: true
+#| warning: false
+#| message: false
+
+#Unique Patients and Hospitalizations
+length(unique(HFNC_data_clean2$cohort_id))
+length(unique(HFNC_data_clean2$hospitalization_id))
+
+#Table1 - Patient Characteristics 
+HFNC_data_table1 <- HFNC_data_clean2 %>%
+  arrange(cohort_id, hospitalization_id) %>%  # sort by patient and admission
+  group_by(cohort_id) %>%
+  slice(1) %>%  # keep only the first admission per patient
+  ungroup() %>%
+  select(age, sex, race, ethnicity, language, Ind_Mortality, ECI_sum,
+         starts_with("ElixCmbtMeas_"))
+
+table1_pts <- HFNC_data_table1 %>%
+  tbl_summary(
+    statistic = all_continuous() ~ "{median} ({p25}, {p75})",  # Median with IQR for continuous variables
+    missing = "no",  # Remove missing values from the table
+    digits = all_continuous() ~ 2   # Round continuous variables to 2 decimal places
+  ) %>%  
+  bold_labels()%>%
+  modify_caption("**Table 1. Baseline Characteristics of Patient Population**")
+
+# Print the summary table
+table1_df <- as_tibble(table1_pts)
+#write.csv(table1_df, "table1_patients.csv", row.names = FALSE)
+
+#Table 2 - Episode Characteristics
+HFNC_data_table2 <- HFNC_data_clean2 %>%
+  select(hospital_id, HFNC_EpNum, Day_of_SOFA_Total, ROX_HFNCstart_cat,
+         paO2_start, paCO2_start, pf_ratio_start, sf_ratio_start, first_HFNC_FiO2,
+         COVID19_byICD10, RASS_grouped, RASS_grouped_24, prior_code_status, next_code_status,
+         location_category, service_cat, discharge_category,
+         Daytime_Sick, prior_respSuppMode, postextub_24, ever_imv_postHFNC, inhosp_deathhosp)
+
+table2_episodes <- HFNC_data_table2 %>%
+  tbl_summary(
+    statistic = all_continuous() ~ "{median} ({p25}, {p75})",  # Median with IQR for continuous variables
+    missing = "no",  # Remove missing values from the table
+    digits = list(
+      all_continuous()    ~ 2,         # 2 decimals for continuous
+      all_categorical()   ~ c(0, 2)    # 0 digits for n, 2 digits for percentage
+    )) %>%
+  bold_labels()%>%
+  modify_caption("**Table 1. Summary Characteristics of HFNC Episodes**")
+
+# Print and save the summary table
+table2_df <- as_tibble(table2_episodes)
+#write.csv(table2_df, "table2_episodes.csv", row.names = TRUE)
+
+#How many patients have more than one episode? 
+HFNC_data_clean2 %>%
+  filter(HFNC_EpNum > 1) %>%
+  distinct(cohort_id) %>%
+  dplyr::summarize(n_unique = n())
+
+#Of all episodes, how many ABGs do we have within 48 hours
+table(is.na(HFNC_data_clean2$ph_start), useNA="ifany")
+prop.table(table(is.na(HFNC_data_clean2$ph_start), useNA="ifany"))
+
+#Of all episodes, how many ABGs do we have within 24 hours
+table(is.na(HFNC_data_clean2$ph_start_24), useNA="ifany")
+prop.table(table(is.na(HFNC_data_clean2$ph_start_24), useNA="ifany"))
+
+#ABGs consistent with hypercarbia
+table(HFNC_data_clean2$paCO2_start_24 > 45 & HFNC_data_clean2$ph_start_24 <7.35)
+prop.table(table(HFNC_data_clean2$paCO2_start_24 > 45 & HFNC_data_clean2$ph_start_24 <7.35))
+
+#when are these episodes happening?
+summary(as.numeric(HFNC_data_clean2$initiation_day/24))
+
+#Revision 
+#Median ECI count and Ind Mortality by Hospital 
+HFNC_data_clean2 %>%
+  group_by(hospital_id) %>%
+  summarise(median = median(ECI_sum, na.rm=TRUE),
+            IQR = IQR(ECI_sum, na.rm=TRUE), 
+            q25 = quantile(ECI_sum, probs = 0.25, na.rm = TRUE), 
+            q75 = quantile(ECI_sum, probs = 0.75, na.rm = TRUE))
+
+HFNC_data_clean2 %>%
+  group_by(hospital_id) %>%
+  summarise(median = median(Ind_Mortality, na.rm=TRUE),
+            IQR = IQR(Ind_Mortality, na.rm=TRUE), 
+            q25 = quantile(Ind_Mortality, probs = 0.25, na.rm = TRUE), 
+            q75 = quantile(Ind_Mortality, probs = 0.75, na.rm = TRUE))
+
+HFNC_data_clean2 %>%
+  group_by(hospital_id) %>%
+  summarise(n_episodes = n(),
+            n_imv = sum(ever_imv_postHFNC), 
+            prop_imv = n_imv / n_episodes,
+            postextub = sum(postextub_24),
+            prop_postextub = postextub / n_episodes,
+            DNI = sum(intubation_permitted == 0),
+            prop_DNI = DNI / n_episodes)
+
+#How many hypercapnic patients were not hypoxemic? 
+HFNC_data_clean2 %>%
+  group_by(hypercarbic_24) %>%
+  count(pf_ratio_start > 300, na.rm=TRUE)
+```
+
+## Duration and Outcomes
+
+```{r Duration}
+#| echo: true
+#| warning: false
+#| message: false
+
+#Describing HFNC duration
+summary(HFNC_data_clean2$HFNCduration)
+hist(HFNC_data_clean2$HFNCduration)
+quantile(HFNC_data_clean2$HFNCduration, probs = c(0.25, 0.5, 0.75, 0.9, 0.95), na.rm = TRUE)
+
+#Describing HFNC duration in initial episodes vs post-extubation episodes 
+summary(HFNC_initial$HFNCduration)
+summary(HFNC_postextub$HFNCduration)
+wilcox.test(HFNCduration ~ postextub_24, data = HFNC_data_clean2)
+
+#Duration prior to intubation 
+summary(HFNC_data_imv48hrs$HFNCduration)
+
+prop.table(table(HFNC_data_imv48hrs$HFNCduration <= 24))
+prop.table(table(HFNC_data_imv48hrs$HFNCduration <= 48))
+prop.table(table(HFNC_data_imv48hrs$HFNCduration <= 72))
+```
+
+```{r Outcomes}
+#Of all episodes, number followed by intubation in the same hospitalization
+table(HFNC_data_clean2$ever_imv_postHFNC == 1)
+prop.table(table(HFNC_data_clean2$ever_imv_postHFNC == 1))
+
+#Of all epsiodes, number followed by in-hospital death or hospice
+table(HFNC_data_clean2$inhosp_deathhosp)
+prop.table(table(HFNC_data_clean2$inhosp_deathhosp))
+
+#Of escalation episodes, number followed by intubation in the same hospitalization
+table(HFNC_initial$ever_imv_postHFNC == 1)
+prop.table(table(HFNC_initial$ever_imv_postHFNC == 1))
+
+#Of escalation epsiodes, number followed by in-hospital death or hospice
+table(HFNC_initial$inhosp_deathhosp)
+prop.table(table(HFNC_initial$inhosp_deathhosp))
+
+#Supplemental table 
+table(HFNC_data_clean2$ever_imv_postHFNC, HFNC_data_clean2$inhosp_deathhosp)
+prop.table(table(HFNC_data_clean2$ever_imv_postHFNC, HFNC_data_clean2$inhosp_deathhosp))
+
+#Hospitalization Outcomes Overall
+table_hospitalization_outcomes <- HFNC_data_clean2 %>%
+  select(
+    ever_ICU,
+    ever_imv_postHFNC,
+    hospLOS_days,
+    ICULOS_days,
+    discharge_category,
+    inhosp_deathhosp
+  ) %>%
+  tbl_summary(
+    statistic = list(
+      all_continuous()    ~ "{median} ({p25}, {p75})",
+      all_categorical()   ~ "{n} ({p}%)"
+    ),
+    missing = "no",
+    digits = list(
+      all_continuous()    ~ 2,         # 2 decimals for continuous
+      all_categorical()   ~ c(0, 2)    # 0 digits for n, 2 digits for percentage
+    )
+  ) %>%
+  bold_labels() %>%
+  modify_caption("**Hospitalization Outcomes - Full Population**")
+
+# Print the summary table
+table_hospitalization_outcomes
+
+#Outcomes in Non-post-extubation cohort
+hospitalization_outcomes_initial <- HFNC_initial %>%
+  select(
+    ever_ICU,
+    ever_imv_postHFNC,
+    hospLOS_days,
+    ICULOS_days,
+    discharge_category,
+    inhosp_deathhosp
+  ) %>%
+  tbl_summary(
+    statistic = list(
+      all_continuous()    ~ "{median} ({p25}, {p75})",
+      all_categorical()   ~ "{n} ({p}%)"
+    ),
+    missing = "no",
+    digits = list(
+      all_continuous()    ~ 2,         # 2 decimals for continuous
+      all_categorical()   ~ c(0, 2)    # 0 digits for n, 2 digits for percentage
+    )
+  ) %>%
+  bold_labels() %>%
+  modify_caption("**Hospitalization Outcomes - Escalation Episodes**")
+
+# Print the summary table
+hospitalization_outcomes_initial
+
+#Outcomes in Postextub Cohort
+table_hospitalization_postextub <- HFNC_postextub %>%
+  select(
+    ever_ICU,
+    ever_imv_postHFNC,
+    hospLOS_days,
+    ICULOS_days,
+    discharge_category,
+    inhosp_deathhosp
+  ) %>%
+  tbl_summary(
+    statistic = list(
+      all_continuous()    ~ "{median} ({p25}, {p75})",
+      all_categorical()   ~ "{n} ({p}%)"
+    ),
+    missing = "no",
+    digits = list(
+      all_continuous()    ~ 2,         # 2 decimals for continuous
+      all_categorical()   ~ c(0, 2)    # 0 digits for n, 2 digits for percentage
+    )
+  ) %>%
+  bold_labels() %>%
+  modify_caption("**Hospitalization Outcomes- Post Extubation Population**")
+
+# Print the summary table
+table_hospitalization_postextub
+
+#Outcomes in IMV within 48hrs not postextub
+table_hospitalization_imv48 <- HFNC_data_imv48hrs %>%
+  select(
+    ever_ICU,
+    ever_imv_postHFNC,
+    hospLOS_days,
+    ICULOS_days,
+    discharge_category,
+    inhosp_deathhosp
+  ) %>%
+  tbl_summary(
+    statistic = list(
+      all_continuous()    ~ "{median} ({p25}, {p75})",
+      all_categorical()   ~ "{n} ({p}%)"
+    ),
+    missing = "no",
+    digits = list(
+      all_continuous()    ~ 2,         # 2 decimals for continuous
+      all_categorical()   ~ c(0, 2)    # 0 digits for n, 2 digits for percentage
+    )
+  ) %>%
+  bold_labels() %>%
+  modify_caption("**Hospitalization Outcomes - If intubated within 48 hours, not post-extubation**")
+
+# Print the summary table
+table_hospitalization_imv48
+
+#comparing death in those intubated and not intubated within 48hrs post HFNC 
+prop.table(table(HFNC_data_imv48hrs$inhosp_deathhosp))
+
+HFNC_data_notimv48hrs <- HFNC_data_notimv48hrs_all %>%
+  filter(postextub_24==0)
+prop.table(table(HFNC_data_notimv48hrs$inhosp_deathhosp))
+
+#Chi Square testing
+HFNC_data_imv48hrs$group <- "IMV ≤48h"
+HFNC_data_notimv48hrs$group <- "No IMV ≤48h"
+combined_data <- bind_rows(HFNC_data_imv48hrs, HFNC_data_notimv48hrs)
+combined_data$inhosp_deathhosp <- as.factor(combined_data$inhosp_deathhosp)
+contingency_table <- table(combined_data$group, combined_data$inhosp_deathhosp)
+chisq_test <- chisq.test(contingency_table)
+print(chisq_test)
+```
+
+## Time Trends
+
+```{r Trends}
+#number of episodes
+#calculating average episodes and average duration by month
+HFNC_data_grouped <- HFNC_data_clean2 
+
+HFNC_data_grouped <- HFNC_data_grouped %>%
+  mutate(start_month = floor_date(HFNC_data_grouped$HFNC_Ep_startDttm, "month"))%>%
+  filter(start_month < as.Date("2025-02-01"))
+
+HFNC_data_grouped <- HFNC_data_grouped %>%
+  dplyr::group_by(start_month) %>%
+  dplyr::summarize(
+    avg_duration = mean(HFNCduration, na.rm=TRUE),
+    avg_SOFA = mean(Day_of_SOFA_Total, na.rm=TRUE),
+    avg_age = mean(age, na.rm=TRUE),
+    avg_ROXscore_start = mean(ROX_HFNCstart, na.rm=TRUE),
+    avg_eci = mean(Ind_Mortality, na.rm=TRUE),
+    n_episodes = n(),
+    n_postextub = sum(postextub_24),
+    n_HFNCend_intubation = sum(HFNCend_intubation),
+    n_ever_ICU_0 = sum(ever_ICU == 0, na.rm = TRUE),
+    n_died = sum(inhosp_deathhosp == "Dead or hospice discharge"),
+    n_hypercarbic = sum(hypercarbic== 1),
+    n_wards = sum(location_category=="ward"),
+    prop_wards = n_wards / n_episodes,
+    prop_ever_ICU_0 = n_ever_ICU_0 / n_episodes, 
+    prop_imv48hrs = n_HFNCend_intubation / n_episodes,
+    prop_died = sum(n_died / n_episodes),
+    prop_hypercarbic = sum(n_hypercarbic / n_episodes),
+    .groups = "drop"
+  ) %>%
+  arrange(start_month)
+
+HFNC_data_grouped <- HFNC_data_grouped %>%
+  arrange(start_month)%>%
+  mutate(time_months = row_number()) 
+
+#Lets compare average number of episodes overall at the end of 2017 and end of 2024
+# Filter for last 6 months of 2017 and 2024
+compare_data <- HFNC_data_grouped %>%
+  filter((year(start_month) == 2017 & month(start_month) %in% 7:12) |
+           (year(start_month) == 2024 & month(start_month) %in% 7:12)) %>%
+  mutate(period = ifelse(year(start_month) == 2017, "2017_H2", "2024_H2"))
+
+#checking normality assumptions - normal so can use t.test
+data_2017 <- compare_data %>% filter(period == "2017_H2") %>% pull(n_episodes)
+data_2024 <- compare_data %>% filter(period == "2024_H2") %>% pull(n_episodes)
+#shapiro.test(data_2017)
+#shapiro.test(data_2024)
+
+data_2017 <- compare_data %>% filter(period == "2017_H2") %>% pull(prop_imv48hrs)
+data_2024 <- compare_data %>% filter(period == "2024_H2") %>% pull(prop_imv48hrs)
+#shapiro.test(data_2017)
+#shapiro.test(data_2024)
+
+data_2017 <- compare_data %>% filter(period == "2017_H2") %>% pull(avg_duration)
+data_2024 <- compare_data %>% filter(period == "2024_H2") %>% pull(avg_duration)
+#shapiro.test(data_2017)
+#shapiro.test(data_2024)
+
+#significant difference between average n_episodes in 2017 and 2024
+t.test(n_episodes ~ period, data = compare_data)
+t.test(prop_imv48hrs ~ period, data = compare_data)
+t.test(avg_duration ~ period, data = compare_data)
+```
+
+## Factors associated with duration and intubation
+
+```{r MVRegressionDuration}
+
+HFNC_data_clean2 <- HFNC_data_clean2 %>%
+  mutate(Day_of_SOFA_cat = case_when(
+    Day_of_SOFA_Total <=4 ~ "<=4", 
+    Day_of_SOFA_Total >4 ~ ">4"))%>%
+  mutate(Admit_SOFA_cat = case_when(
+    Admit_SOFA_Total <=4 ~ "<=4", 
+    Admit_SOFA_Total >4 ~ ">4"))%>%
+  mutate(ECI_mortality_cat = case_when(
+    Ind_Mortality <= 40 ~ "<=40",
+    Ind_Mortality >40 ~ ">40"
+  ))
+
+HFNC_data_clean2 <- HFNC_data_clean2 %>%
+  mutate(agegt65 = ifelse(age >= 65, 1, 0))
+
+HFNC_data_clean2$COVID19_byICD10 <- as.factor(HFNC_data_clean2$COVID19_byICD10)
+HFNC_data_clean2$COVID19_byICD10 <- relevel(HFNC_data_clean2$COVID19_byICD10, ref="COVID negative")
+
+HFNC_data_clean2 <- HFNC_data_clean2 %>%
+  mutate(race_simple = ifelse(HFNC_data_clean2$race == "White", "White", "Non-White"))
+
+HFNC_data_clean2$adm_month <- as.factor(HFNC_data_clean2$adm_month)
+HFNC_data_clean2$adm_month <- relevel(HFNC_data_clean2$adm_month, ref="1")
+
+duration_predictors <- lm(HFNCduration ~ agegt65 + sex + race_simple + ethnicity +
+                          ECI_mortality_cat + ECI_sum + Day_of_SOFA_cat +
+                          Admit_SOFA_cat + ROX_HFNCstart_cat +
+                          COVID19_byICD10 + location_category + hospital_type +
+                          adm_month + intubation_permitted + service_cat , 
+                        data=HFNC_data_clean2)
+
+summ(duration_predictors, robust = TRUE, cluster = "cohort_id", confint=TRUE)
+```
+
+```{r MVRegressionIntubation}
+
+#Factors associated with odds of intubation in people who are OK to Intubate
+HFNC_data_OKtoI$ROX_HFNCstart_cat <- as.factor(HFNC_data_OKtoI$ROX_HFNCstart_cat)
+HFNC_data_OKtoI$ROX_HFNCstart_cat <- relevel(HFNC_data_OKtoI$ROX_HFNCstart_cat, ref="Low Risk")
+
+HFNC_data_OKtoI$COVID19_byICD10 <- as.factor(HFNC_data_OKtoI$COVID19_byICD10)
+HFNC_data_OKtoI$COVID19_byICD10 <- relevel(HFNC_data_OKtoI$COVID19_byICD10, ref="COVID negative")
+
+HFNC_data_OKtoI$location_category <- as.factor(HFNC_data_OKtoI$location_category)
+HFNC_data_OKtoI$location_category <- relevel(HFNC_data_OKtoI$location_category, ref="icu")
+
+HFNC_data_OKtoI <- HFNC_data_OKtoI %>%
+  mutate(Day_of_SOFA_cat = case_when(
+    Day_of_SOFA_Total <=4 ~ "<=4", 
+    Day_of_SOFA_Total >4 ~ ">4"))%>%
+  mutate(Admit_SOFA_cat = case_when(
+    Admit_SOFA_Total <=4 ~ "<=4", 
+    Admit_SOFA_Total >4 ~ ">4"))%>%
+  mutate(ECI_mortality_cat = case_when(
+    Ind_Mortality <= 40 ~ "<=40",
+    Ind_Mortality >40 ~ ">40"
+  ))%>%
+  mutate(agegt65 = ifelse(age >= 65, 1, 0))
+
+HFNC_data_OKtoI <- HFNC_data_OKtoI %>%
+  mutate(RASS_simple = ifelse(RASS_grouped == "-1 to +1", "Normal", "Abnormal")) 
+
+HFNC_data_OKtoI <- HFNC_data_OKtoI %>%
+  mutate(service_cat_simple = ifelse(service_cat == "medical", "medical", "surgical_other")) 
+
+#understanding code status 
+prop.table(table(HFNC_data_OKtoI$agegt65, HFNC_data_OKtoI$prior_code_status))
+prop.table(table(HFNC_data_OKtoI$agegt65, HFNC_data_OKtoI$next_code_status))
+
+HFNC_data_OKtoI$next_codeStatus_dttm  <- as.POSIXct(HFNC_data_OKtoI$next_codeStatus_dttm, format = "%Y-%m-%d %H:%M:%S", tz="UTC")
+
+HFNC_data_OKtoI <- HFNC_data_OKtoI %>%
+  mutate(next_cs_onHF = case_when(
+    next_codeStatus_dttm < HFNC_Ep_endDttm ~ next_code_status,
+    TRUE ~ prior_code_status
+  ))
+
+prop.table(table(HFNC_data_OKtoI$agegt65, HFNC_data_OKtoI$next_cs_onHF))
+
+HFNC_data_OKtoI2 <- HFNC_data_OKtoI %>%
+  filter(next_cs_onHF != "No CPR - Do NOT Intubate") %>%
+  filter(next_cs_onHF != "No CPR - Palliative and Supportive Care")
+
+#revision
+#assessing predictors only in patients who remain OK to I throughout HFNC episode and also removed RASS from model         
+intubation_predictors <- glm(HFNCend_intubation ~ agegt65 + sex + race + ethnicity +
+                          ECI_mortality_cat + Day_of_SOFA_cat +
+                          Admit_SOFA_cat + ROX_HFNCstart_cat +
+                          COVID19_byICD10 + location_category + hospital_type +
+                          adm_month + service_cat_simple, 
+                        data=HFNC_data_OKtoI2, family = binomial)
+
+summ(intubation_predictors, robust = TRUE, cluster = "cohort_id", confint=TRUE)
+
+clustered_se_vcov <- sandwich::vcovCL(intubation_predictors, cluster = ~cohort_id)
+coef_estimates <- coef(intubation_predictors)
+coef_se <- sqrt(diag(clustered_se_vcov))
+z_values <- coef_estimates / coef_se
+p_values <- 2 * pnorm(abs(z_values), lower.tail = FALSE)
+OR <- exp(coef_estimates)
+conf_low <- exp(coef_estimates - 1.96 * coef_se)
+conf_high <- exp(coef_estimates + 1.96 * coef_se)
+
+intub_predict_df <- tibble(
+  term = names(coef_estimates),
+  estimate = coef_estimates,
+  std.error = coef_se,
+  z.value = z_values,
+  p.value = p_values,
+  OR = OR,
+  conf.low = conf_low,
+  conf.high = conf_high
+) %>%
+  filter(term != "(Intercept)")  # ← removes intercept
+
+intub_predict_df_sig <- intub_predict_df %>%
+  filter(conf.low >= 1 | conf.high <= 1)
+```
+
+## Variation by Service
+
+```{r Service}
+#| echo: true
+#| warning: false
+#| message: false
+
+#Medical vs surgical patients 
+HFNC_data_medsurg <- HFNC_data_clean2 %>%
+  filter(service_cat != "other")
+
+HFNC_data_medsurg$service_cat <- factor(HFNC_data_medsurg$service_cat, 
+                                        levels = c("medical","surgical"))
+
+hospitalization_outcomes_medsurg <- HFNC_data_medsurg %>%
+  group_by(hospitalization_id, service_cat) %>%
+  summarise(
+    ever_ICU = first(ever_ICU),
+    ever_imv_postHFNC = first(ever_imv_postHFNC),
+    postextub = first(postextub_24),
+    hospLOS_days = first(hospLOS_days),
+    ICULOS_days = first(ICULOS_days),
+    discharge_category = first(discharge_category),
+    inhosp_deathhosp = first(inhosp_deathhosp)
+  ) %>%
+  ungroup()
+
+table_hospitalization_outcomes_medsurg <- hospitalization_outcomes_medsurg %>%
+  select(-hospitalization_id) %>%
+  tbl_summary(
+    by = service_cat, 
+    statistic = all_continuous() ~ "{median} ({p25}, {p75})",  # Median with IQR for continuous variables
+    missing = "no",  # Remove missing values from the table
+    digits = all_continuous() ~ 2   # Round continuous variables to 2 decimal places
+  ) %>%  
+  modify_caption("**Hospitalization Outcomes - By Service**")
+
+# Print the summary table
+table_hospitalization_outcomes_medsurg
+
+chisq.test(x= HFNC_data_medsurg$ever_ICU, y= HFNC_data_medsurg$service_cat)
+chisq.test(x= HFNC_data_medsurg$ever_imv_postHFNC, y= HFNC_data_medsurg$service_cat)
+chisq.test(x= HFNC_data_medsurg$postextub_24, y= HFNC_data_medsurg$service_cat)
+chisq.test(x= HFNC_data_medsurg$inhosp_deathhosp, y= HFNC_data_medsurg$service_cat)
+
+#multivariable mortality 
+HFNC_data_medsurg <-HFNC_data_medsurg %>%
+  mutate(inhosp_deathhosp_num = case_when(
+    inhosp_deathhosp == "Alive at discharge" ~ 0,
+    TRUE ~ 1))
+
+medsurg_mortality <- glm(inhosp_deathhosp_num ~ service_cat + age + sex + race +
+                                   Ind_Mortality + Day_of_SOFA_Total +
+                                   Admit_SOFA_Total + ROX_HFNCstart_cat +
+                           COVID19_byICD10 + intubation_permitted + hospital_type, 
+                                 family = binomial, data = HFNC_data_medsurg)
+
+clustered_se_vcov <- sandwich::vcovCL(medsurg_mortality, cluster = ~cohort_id)
+coef_estimates <- coef(medsurg_mortality)
+coef_se <- sqrt(diag(clustered_se_vcov))
+z_values <- coef_estimates / coef_se
+p_values <- 2 * pnorm(abs(z_values), lower.tail = FALSE)
+
+OR <- exp(coef_estimates)
+conf_low <- exp(coef_estimates - 1.96 * coef_se)
+conf_high <- exp(coef_estimates + 1.96 * coef_se)
+
+results_df_medsurg <- tibble(
+  term = names(coef_estimates),
+  estimate = coef_estimates,
+  std.error = coef_se,
+  z.value = z_values,
+  p.value = p_values,
+  OR = OR,
+  conf.low = conf_low,
+  conf.high = conf_high
+)
+
+#multivariable intubation within 48 hours
+medsurg_intubation <- glm(ever_imv_postHFNC ~ service_cat + age + sex + race +
+                                   Ind_Mortality + Day_of_SOFA_Total +
+                                   Admit_SOFA_Total + ROX_HFNCstart_cat +
+                           COVID19_byICD10 + intubation_permitted + hospital_type,  
+                                 family = binomial, data = HFNC_data_medsurg)
+
+clustered_se_vcov <- sandwich::vcovCL(medsurg_intubation, cluster = ~cohort_id)
+coef_estimates <- coef(medsurg_intubation)
+coef_se <- sqrt(diag(clustered_se_vcov))
+z_values <- coef_estimates / coef_se
+p_values <- 2 * pnorm(abs(z_values), lower.tail = FALSE)
+OR <- exp(coef_estimates)
+conf_low <- exp(coef_estimates - 1.96 * coef_se)
+conf_high <- exp(coef_estimates + 1.96 * coef_se)
+
+results_df_medsurg_imv <- tibble(
+  term = names(coef_estimates),
+  estimate = coef_estimates,
+  std.error = coef_se,
+  z.value = z_values,
+  p.value = p_values,
+  OR = OR,
+  conf.low = conf_low,
+  conf.high = conf_high
+)
+```
+
+## Variation by Hospital
+
+```{r Hospital}
+#| echo: true
+#| warning: false
+#| message: false
+
+hospitalization_outcomes_hospital <- HFNC_data_clean2 %>%
+  group_by(hospitalization_id, hospital_id) %>%
+  summarise(
+    ever_ICU = first(ever_ICU),
+    ever_imv_postHFNC = first(ever_imv_postHFNC),
+    postextub = first(postextub_24),
+    hospLOS_days = first(hospLOS_days),
+    ICULOS_days = first(ICULOS_days),
+    discharge_category = first(discharge_category),
+    inhosp_deathhosp = first(inhosp_deathhosp)
+  ) %>%
+  ungroup()
+
+table_hospitalization_outcomes_hospital <- hospitalization_outcomes_hospital %>%
+  tbl_summary(
+    by = hospital_id, 
+    statistic = all_continuous() ~ "{median} ({p25}, {p75})",  # Median with IQR for continuous variables
+    missing = "no",  # Remove missing values from the table
+    digits = all_continuous() ~ 2   # Round continuous variables to 2 decimal places
+  ) %>%  
+  bold_labels()%>%
+  modify_caption("**Hospitalization Outcomes - By Hospital**")
+
+# Print the summary table
+table_hospitalization_outcomes_hospital_df <- as.data.frame(table_hospitalization_outcomes_hospital)
+
+chisq.test(x= HFNC_data_clean2$hospital_id, y= HFNC_data_clean2$ever_ICU)
+chisq.test(x= HFNC_data_clean2$hospital_id, y= HFNC_data_clean2$ever_imv_postHFNC)
+chisq.test(x= HFNC_data_clean2$hospital_id, y= HFNC_data_clean2$inhosp_deathhosp)
+
+#multivariable mortality 
+HFNC_data_clean2 <-HFNC_data_clean2 %>%
+  mutate(inhosp_deathhosp_num = case_when(
+    inhosp_deathhosp == "Alive at discharge" ~ 0,
+    TRUE ~ 1))
+
+hosp_mortality <- glm(inhosp_deathhosp_num ~ hospital_id + COVID19_byICD10 +
+                         service_cat + age + sex + race + ethnicity +
+                         Ind_Mortality + ECI_sum + adm_month +
+                         Day_of_SOFA_Total + ROX_HFNCstart_cat + RASS_grouped +
+                         prior_code_status + postextub_24, 
+                                 family = binomial, data = HFNC_data_clean2)
+
+clustered_se_vcov <- sandwich::vcovCL(hosp_mortality, cluster = ~cohort_id)
+coef_estimates <- coef(hosp_mortality)
+coef_se <- sqrt(diag(clustered_se_vcov))
+z_values <- coef_estimates / coef_se
+p_values <- 2 * pnorm(abs(z_values), lower.tail = FALSE)
+OR <- exp(coef_estimates)
+conf_low <- exp(coef_estimates - 1.96 * coef_se)
+conf_high <- exp(coef_estimates + 1.96 * coef_se)
+
+results_df_hosp_mortality <- tibble(
+  term = names(coef_estimates),
+  estimate = coef_estimates,
+  std.error = coef_se,
+  z.value = z_values,
+  p.value = p_values,
+  OR = OR,
+  conf.low = conf_low,
+  conf.high = conf_high
+)
+
+#multivariable intubation
+hosp_intubation <- glm(ever_imv_postHFNC ~ hospital_id + COVID19_byICD10 +
+                         service_cat + age + sex + race + ethnicity +
+                         Ind_Mortality + ECI_sum + adm_month +
+                         Day_of_SOFA_Total + ROX_HFNCstart_cat + RASS_grouped +
+                         prior_code_status + postextub_24,
+                                 family = binomial, data = HFNC_data_clean2)
+
+clustered_se_vcov <- sandwich::vcovCL(hosp_intubation, cluster = ~cohort_id)
+coef_estimates <- coef(hosp_intubation)
+coef_se <- sqrt(diag(clustered_se_vcov))
+z_values <- coef_estimates / coef_se
+p_values <- 2 * pnorm(abs(z_values), lower.tail = FALSE)
+OR <- exp(coef_estimates)
+conf_low <- exp(coef_estimates - 1.96 * coef_se)
+conf_high <- exp(coef_estimates + 1.96 * coef_se)
+
+results_df_hosp_intubation <- tibble(
+  term = names(coef_estimates),
+  estimate = coef_estimates,
+  std.error = coef_se,
+  z.value = z_values,
+  p.value = p_values,
+  OR = OR,
+  conf.low = conf_low,
+  conf.high = conf_high
+)
+```
+
+```{r DeathMixedEffects}
+#| eval: false
+#| echo: true
+
+HFNC_data_clean2 <-HFNC_data_clean2 %>%
+  mutate(inhosp_deathhosp_num = case_when(
+    inhosp_deathhosp == "Alive at discharge" ~ 0,
+    TRUE ~ 1))
+
+#death and hospital_id 
+death_memodel1 <- glmer(inhosp_deathhosp_num ~ (1|hospital_id), data=HFNC_data_clean2, family=binomial)
+summary(death_memodel1)
+
+variance_components_death1 <- as.data.frame(VarCorr(death_memodel1))
+hospital_variance_death1 <- variance_components_death1$vcov[1]
+ICC_deathmemodel1 <- hospital_variance_death1 /  (hospital_variance_death1 + (pi^2 / 3))
+
+HFNC_data_clean2 <- HFNC_data_clean2 %>%
+  mutate(
+    ECI_sum_z = scale(ECI_sum),
+    Day_of_SOFA_Total_z = scale(Day_of_SOFA_Total),
+    ROX_HFNCstart_cat = as.factor(ROX_HFNCstart_cat),
+    age_z = scale(age),
+    Ind_Mortality_z = scale(Ind_Mortality)
+  )
+
+HFNC_data_clean2$prior_code_status <- as.factor(HFNC_data_clean2$prior_code_status)
+HFNC_data_clean2 <- HFNC_data_clean2 %>%
+  mutate(
+    prior_code_status_simple = ifelse(prior_code_status == "CPR - Full Code", "Full Code","Other"
+  ))
+
+HFNC_data_clean2$ethnicity <- as.factor(HFNC_data_clean2$ethnicity)
+HFNC_data_clean2 <- HFNC_data_clean2 %>%
+  mutate(
+    ethnicity_simple = ifelse(ethnicity == "Non-Hispanic", "Non-Hispanic","Hispanic or Other"
+  ))
+
+death_memodel2 <- glmer(inhosp_deathhosp_num ~ age_z + sex + race +
+                          ethnicity_simple + Ind_Mortality_z + ECI_sum_z +
+                          prior_code_status_simple + 
+                          Day_of_SOFA_Total_z + ROX_HFNCstart_cat + 
+                          COVID19_byICD10 + service_cat + postextub_24 +
+                          (1|hospital_id),
+                        data=HFNC_data_clean2, family=binomial)
+summary(death_memodel2)
+
+variance_components_death2 <- as.data.frame(VarCorr(death_memodel2))
+hospital_variance_death2 <- variance_components_death2$vcov[1]
+ICC_deathmemodel2 <- hospital_variance_death2 / (hospital_variance_death2 + (pi^2 / 3))
+
+#calculating proportional change in variance 
+PCV_1_to_2_death <- (hospital_variance_death1 - hospital_variance_death2) / hospital_variance_death1 * 100
+```
+
+```{r imvMixedEffects}
+#| eval: false
+#| echo: true
+
+imv_memodel1 <- glmer(ever_imv_postHFNC ~ (1|hospital_id), data=HFNC_data_clean2, family=binomial)
+summary(imv_memodel1)
+
+variance_components_imv1 <- as.data.frame(VarCorr(imv_memodel1))
+hospital_variance_imv1 <- variance_components_imv1$vcov[1]
+ICC_imv_memodel1 <- hospital_variance_imv1 /  (hospital_variance_imv1 + (pi^2 / 3))
+
+imv_memodel2 <- glmer(ever_imv_postHFNC ~ age_z + sex + race +
+                          ethnicity_simple + Ind_Mortality_z + ECI_sum_z +
+                          prior_code_status_simple + 
+                          Day_of_SOFA_Total_z + ROX_HFNCstart_cat + 
+                          COVID19_byICD10 + service_cat + postextub_24 +
+                          (1|hospital_id),
+                        data=HFNC_data_clean2, family=binomial)
+summary(imv_memodel2)
+
+variance_components_imv2 <- as.data.frame(VarCorr(imv_memodel2))
+hospital_variance_imv2 <- variance_components_imv2$vcov[1]
+ICC_imv_memodel2 <- hospital_variance_imv2 / (hospital_variance_imv2 + (pi^2 / 3))
+
+#calculating proportional change in variance 
+PCV_1_to_2_imv <- (hospital_variance_imv1 - hospital_variance_imv2) / hospital_variance_imv1 * 100
+
+# Calculate MOR
+hospital_var_imv <- as.data.frame(VarCorr(imv_memodel2))$vcov[1]
+MOR_imv <- exp(sqrt(2 * hospital_var_imv) * qnorm(0.75))
+MOR_imv
+```
+
+## Figures
+
+Figure 1
+
+```{r TimeTrends}
+# Plot post extubation and all episodes together 
+plot_data <- HFNC_data_grouped %>%
+  mutate(start_month = as.Date(start_month))
+
+# Scale factor to match the two ranges visually
+scale_factor <- max(plot_data$n_episodes, na.rm = TRUE) / max(plot_data$n_postextub, na.rm = TRUE)
+
+#Figure 3
+ggplot(plot_data, aes(x = start_month)) +
+  # Left y-axis: Number of episodes
+  geom_line(aes(y = n_episodes), color = "steelblue", size = 1.2) +
+  
+  # Right y-axis: Number post-extubation (rescaled)
+  geom_line(aes(y = n_postextub * scale_factor), color = "firebrick", size = 1.2) +
+
+  scale_y_continuous(
+  name = "Number of HFNC Episodes",
+  limits = c(0, 700),  # Force y-axis to start at 0 and go to 500
+  breaks = seq(0, 700, by = 100),
+  sec.axis = sec_axis(
+    ~ . / scale_factor,
+    name = "Number of Post-Extubation Episodes",
+    breaks = seq(0, 125, by = 25)
+  )
+) +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  
+  labs(
+    title = "Monthly HFNC Episode Count Overall & Post Extubation",
+    x = "Start Month"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title.y = element_text(color = "steelblue"),
+    axis.title.y.right = element_text(color = "firebrick"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+
+```
+
+Figure 2
+
+```{r Sankey}
+#| echo: true
+#| warning: false
+#| message: false
+
+HFNC_data_clean2 <- HFNC_data_clean2 %>%
+  mutate(final_outcome = if_else(inhosp_deathhosp == "Dead or hospice discharge", 
+                                 "Death", "Recovery"))
+
+sankey_data <- HFNC_data_clean2 %>%
+  mutate(
+    HFNCoutcome = case_when(
+      HFNCoutcome == "Episode followed by recovery but then more HFNC >48 hours later" ~ "Multiple HFNC Episodes >48h Apart",
+      HFNCoutcome == "Episode followed by intubation within 48hrs, no intervening HFNC episode" ~ "HFNC -> Intubated ≤48h",
+      HFNCoutcome == "Episode followed by death without intubation" ~ "HFNC -> Death (no intubation)",
+      HFNCoutcome == "Episode followed by recovery without more HFNC or intubation" ~ "HFNC -> Recovery (no intubation)",
+      HFNCoutcome == "Episode followed by no more HFNC, but intubation > 48 hours later" ~ "HFNC -> Intubated >48h",
+      TRUE ~ HFNCoutcome
+    ),
+    stage1 = if_else(postextub_24 == 1, "Yes", "No"),
+    stage2 = if_else(ever_imv_postHFNC == 1, "Yes","No"),
+    stage3 = if_else(inhosp_deathhosp == "Dead or hospice discharge", "Death", "Recovery")
+  ) %>%
+  select(stage1, stage2, stage3)
+
+# 2. Count occurrences
+sankey_data <- sankey_data %>%
+  mutate(
+    stage1 = factor(stage1),
+    stage2 = factor(stage2, levels = c("Yes", "No")),
+    stage3 = factor(stage3)
+  )
+
+sankey_counts <- sankey_data %>%
+  count(stage1, stage2, stage3, name = "Freq")
+
+sankey_counts <- sankey_counts %>%
+  mutate(flow_id = paste(stage1, stage2, stage3, sep = ".")) %>%
+  mutate(total = sum(Freq)) %>%
+  mutate(percent = Freq / total * 100)%>%
+  mutate(label = paste0(" (", round(percent, 1), "%)"))
+
+ggplot(sankey_counts,
+       aes(axis1 = stage1, axis2 = stage2, axis3 = stage3, y = Freq)) +
+  geom_alluvium(aes(fill = stage2), width = 0.6, color = "gray60") +
+  geom_stratum(width = 0.4, fill = "gray90", color = "black") +
+  geom_text(stat = "stratum", 
+            aes(label = str_wrap(paste0(after_stat(stratum), 
+            " (", round(after_stat(prop) * 100, 1), "%)"), width=8)),
+            size = 2.5, lineheight = 1.1)+
+  scale_x_discrete(
+    limits = c("Stage 1", "Stage 2", "Stage 3"),
+    labels = c("Post-extubation", "Intubation", "Final Outcome"),
+    expand = c(.05, .05)
+  ) +
+  labs(
+    title = "Sankey Diagram of HFNC Episode Trajectories",
+    y = "Number of Episodes",
+    fill = "Flow Path"
+  ) +
+  theme_minimal(base_size = 12) + 
+  theme(legend.position = "none")
+
+```
+
+Figure 3
+
+```{r 96hr fig and cumulative outcomes fig}
+#| echo: true
+#| warning: false
+#| message: false
+#Filtering to first episodes only, and not post-extubation
+HFNC_data_clean_firstep <- HFNC_data_clean2 %>%
+  filter(HFNC_EpNum == 1) %>%
+  filter(postextub_24 == 0)
+
+## Working backwards from 96 hours
+HFNC_data_transition_plot <- HFNC_data_clean_firstep %>%
+  mutate(
+    episode_id = row_number(),  # unique ID per episode
+    death_type = case_when(
+      discharge_category == "Hospice" ~ "Died (Hospice)",
+      !is.na(death_dttm) & (death_dttm <= hospDisc_dttm + lubridate::hours(24)) ~ "Died (Inpatient)",
+      TRUE ~ "Alive at Discharge"
+    ),
+    death_dttm = if_else(discharge_category == "Hospice", hospDisc_dttm, death_dttm),
+    
+    HFNC_start_hour = 0,  # time zero per episode
+    HFNC_end_hour   = as.numeric(difftime(HFNC_Ep_endDttm, HFNC_Ep_startDttm, units = "hours")),
+    imv_hour        = as.numeric(difftime(postHFNC_IMVstartDttm, HFNC_Ep_startDttm, units = "hours")),
+    death_hour      = as.numeric(difftime(death_dttm, HFNC_Ep_startDttm, units = "hours")),
+    discharge_hour  = as.numeric(difftime(hospDisc_dttm, HFNC_Ep_startDttm, units = "hours"))
+  )
+
+time_bins <- seq(0, 96, by = 12)
+HFNC_episode_states <- HFNC_data_transition_plot %>%
+  mutate(
+    # Set time-from-HFNC-start markers
+    HFNC_start_hour = 0,
+    HFNC_end_hour = as.numeric(difftime(HFNC_Ep_endDttm, HFNC_Ep_startDttm, units = "hours")),
+    imv_hour        = as.numeric(difftime(postHFNC_IMVstartDttm, HFNC_Ep_startDttm, units = "hours")),
+    death_hour      = as.numeric(difftime(death_dttm, HFNC_Ep_startDttm, units = "hours")),
+    discharge_hour  = as.numeric(difftime(hospDisc_dttm, HFNC_Ep_startDttm, units = "hours")),
+
+    # Flag whether still inpatient at 96h
+    still_in_hospital_96h = is.na(discharge_hour) | discharge_hour > 96,
+
+    # Assign final state at 96h
+    final_state_at_96 = case_when(
+      !is.na(death_hour)     & death_hour     <= 96 ~ "Death",
+      !is.na(discharge_hour) & discharge_hour <= 96 ~ "Discharged",
+      !is.na(imv_hour)       & imv_hour       <= 96 ~ "Intubated",
+      HFNC_end_hour <= 96 & still_in_hospital_96h ~ "Post HFNC but still inpatient",
+      TRUE ~ "On HFNC"
+    ),
+
+    # State transition hour — for plotting transitions
+    state_transition_hour = case_when(
+      final_state_at_96 == "Death"                        ~ death_hour,
+      final_state_at_96 == "Discharged"                   ~ discharge_hour,
+      final_state_at_96 == "Intubated"                          ~ imv_hour,
+      final_state_at_96 == "Post HFNC but still inpatient"~ HFNC_end_hour,
+      TRUE                                                ~ 9999  # still on HFNC
+    )
+  )
+
+# Step 2: Function to assign state at each time point
+assign_state_at_time <- function(df_episode, time_bins) {
+  # Transition time should reflect the end of HFNC or the earliest event
+  transition_time <- df_episode$state_transition_hour
+  final_state <- df_episode$final_state_at_96
+  
+  # Logic to handle "Post HFNC but still inpatient" if HFNC ends before 96 hours
+  states_at_times <- sapply(time_bins, function(t) {
+    if (t < transition_time) {
+      return("On HFNC")  # Patient is still on HFNC
+    } else if (t >= transition_time && final_state == "Post HFNC but still inpatient") {
+      return("Post HFNC but still inpatient")  # Transition from HFNC, but not discharged
+    } else {
+      return(final_state)  # Final state (Death, Discharged, Intubated)
+    }
+  })
+  
+  # Return the final data frame
+  data.frame(
+    episode_id = df_episode$episode_id,
+    time_hour = as.numeric(time_bins),
+    state = states_at_times
+  )
+}
+
+# Step 3: Apply function to all episodes
+patient_states_over_time <- HFNC_episode_states %>%
+  group_split(episode_id) %>%
+  map_dfr(~ assign_state_at_time(.x %>% slice(1), time_bins))
+
+# Step 4: Summarize the timeline by proportion in each state
+timeline_summary2 <- patient_states_over_time %>%
+  group_by(time_hour, state) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(time_hour) %>%
+  mutate(percent = n / sum(n))
+
+# Get the max time point
+max_time <- max(timeline_summary2$time_hour)
+
+# Extract the final time point and compute position for text labels
+label_data <- timeline_summary2 %>%
+  filter(time_hour == max_time) %>%
+  arrange(desc(state)) %>%
+  mutate(
+    label = paste0(scales::percent(percent, accuracy = 0.1)),
+    ypos = cumsum(percent) - (percent / 2)  # center of each area
+  )
+
+ggplot(timeline_summary2, aes(x = time_hour, y = percent, fill = state)) +
+  geom_bar(stat = "identity") +  # Use bars to show proportions
+  scale_fill_manual(values = c("On HFNC" = "#6BAED6", 
+                               "Discharged" = "#C6DBEF", 
+                               "Intubated" = "#DCEFF9", 
+                               "Death" = "darkblue",
+                               "Post HFNC but still inpatient" = "lightblue")) +
+  labs(title = "Proportion of Overall Episodes in Each State Over Time", 
+       x = "Time (hours since HFNC start)", 
+       y = "Proportion of Episodes") +
+    geom_text(
+    data = label_data,
+    aes(x = max_time + 6, y = ypos, label = label),  # Slightly offset to right
+    inherit.aes = FALSE,
+    size = 3,
+    hjust = 0
+  ) +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(0, max(timeline_summary2$time_hour), by = 12)) +
+  coord_cartesian(xlim = c(0, max_time + 20)) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1))
+```
+
+Figure 4
+
+```{r FactorsAssociatedWIntubation}
+pretty_labels <- c(
+  "COVID19_byICD10COVID positive" = "COVID-19 Positive",
+  "ROX_HFNCstart_catHigh Risk" = "High Risk ROX Index",
+  "agegt65" = "Age ≥65",
+  "ECI_mortality_cat>40" = "ECI mortality index >40",
+  "RASS_simpleNormal" = "RASS -1 to +1",
+  "Day_of_SOFA_cat>4" = "SOFA Score ≥5 on Day of HFNC Initiation",
+  "location_categoryed" = "HFNC Initiated in the ED (vs ICU)",
+  "hospital_typecommunity" = "Community hospital (vs Academic)",
+  "service_cat_simplesurgical_other" = "Non-medical service",
+  "raceBlack or African American" = "Black or African American Race"
+)
+
+intub_predict_df_sig <- intub_predict_df_sig %>%
+  mutate(
+    pretty_term = recode(term, !!!pretty_labels),  # match labels
+    pretty_term = fct_reorder(pretty_term, OR)     # reorder for plotting
+  )
+
+ggplot(intub_predict_df_sig, aes(x = pretty_term, y = OR, ymin = conf.low, ymax = conf.high)) +
+  geom_pointrange(color = "#2c3e50", size = 0.7) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  coord_flip() +
+  scale_y_log10() +  # odds ratios are best viewed on log scale
+  labs(
+    x = NULL,
+    y = "Odds Ratio",
+    title = "Significant Predictors of Intubation on HFNC",
+    caption = "Error bars show 95% Confidence Intervals"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0),  # smaller, left-aligned
+    plot.title.position = "plot", 
+    axis.text.y = element_text(hjust = 1)
+  )
+```
